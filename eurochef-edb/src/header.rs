@@ -26,8 +26,16 @@ pub type EXGeoMaterialHeader = EXGeoCommonArrayElement;
 pub struct EXGeoHeader {
     pub hashcode: u32,
 
-    #[brw(assert(version.ge(&182) || version.le(&263), "Unsupported version {version}"))]
-    pub version: u32,
+    // ! Disney Universe (and presumably later EngineXT titles) is the first
+    // ! seen title where this slot isn't a plain u32 - the upper 16 bits are
+    // ! a separate field (seen value: 2, meaning unknown) and the actual
+    // ! version is only the lower 16 bits. Every older title happens to have
+    // ! 0 in the upper half, so reading the whole thing as one u32 silently
+    // ! worked for them by coincidence.
+    pub version_unk: u16,
+
+    #[brw(assert(version.ge(&182) || version.le(&335), "Unsupported version {version}"))]
+    pub version: u16,
 
     pub flags: u32,
     pub time: u32,
@@ -39,10 +47,10 @@ pub struct EXGeoHeader {
     #[brw(seek_before = SeekFrom::Start(if version.lt(&248) { 0x54 } else { 0x40 } ))]
     pub section_list: EXGeoHashArray<()>, // 0x40
     pub refpointer_list: EXGeoHashArray<EXGeoRefPointerHeader>,
-    #[br(args(version))]
+    #[br(args(version as u32))]
     pub entity_list: EXGeoHashArray<EXGeoEntityHeader>, // 0x50
     pub anim_list: EXGeoHashArray<EXGeoAnimHeader>,
-    #[br(args(version))]
+    #[br(args(version as u32))]
     pub animskin_list: EXGeoHashArray<EXGeoAnimSkinHeader>, // 0x60
     pub animscript_list: EXGeoHashArray<EXGeoAnimScriptHeader>,
     pub map_list: EXGeoHashArray<EXGeoMapHeader>, // 0x70
