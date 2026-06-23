@@ -1,4 +1,4 @@
-use std::io::SeekFrom;
+use std::io::{Seek, SeekFrom};
 
 use binrw::binrw;
 
@@ -177,6 +177,64 @@ impl EXGeoHeaderXT {
         };
         cursor.read_type(endian)
     }
+
+    /// Reads `texture_list` and `material_list` contents from their *real*
+    /// positions.
+    ///
+    /// Important quirk: each list descriptor's `offset_absolute` field is
+    /// **not** where this data actually lives -- at least for
+    /// `texture_list`/`material_list`/`entity_list`, the real data is
+    /// packed back-to-back in a fixed order (textures, then materials,
+    /// then entities, ...) starting immediately after the fixed 0xB0-byte
+    /// header, regardless of what the descriptor offsets claim. Verified
+    /// against multiple real files where the declared offset and the
+    /// computed sequential offset clearly diverge (e.g. `texture_list`
+    /// declared offset `0x64`, real data found at the fixed `0xB0`).
+    ///
+    /// `texture_list` entries are a flat `u32` hashcode each (4 bytes).
+    /// `material_list` entries are 20 bytes: `material_uid: u32`,
+    /// `texture_uid: u32` (the texture this material references),
+    /// `_reserved: u32` (always 0 in samples seen), `index: u32` (a
+    /// 0-based position counter, purpose beyond ordering unconfirmed),
+    /// `packed: u32` (low byte always 1 in samples seen, meaning
+    /// unconfirmed -- possibly a flags/size field).
+    ///
+    /// `entity_list` is not handled here yet -- it has a further wrinkle
+    /// (a sub-table of reference hashcodes precedes entries that echo one
+    /// of those hashcodes back plus extra fields, not yet fully mapped).
+    pub fn read_texture_and_material_lists(&self, decrypted: &[u8], endian: binrw::Endian) -> binrw::BinResult<(Vec<u32>, Vec<EXGeoMaterialEntryXT>)> {
+        use binrw::BinReaderExt;
+        let mut cursor = std::io::Cursor::new(decrypted);
+
+        let tex_start = 0xB0u64;
+        cursor.seek(std::io::SeekFrom::Start(tex_start))?;
+        let mut textures = Vec::with_capacity(self.texture_list.count as usize);
+        for _ in 0..self.texture_list.count {
+            textures.push(cursor.read_type::<u32>(endian)?);
+        }
+
+        let mat_start = tex_start + (self.texture_list.count as u64) * 4;
+        cursor.seek(std::io::SeekFrom::Start(mat_start))?;
+        let mut materials = Vec::with_capacity(self.material_list.count as usize);
+        for _ in 0..self.material_list.count {
+            materials.push(cursor.read_type::<EXGeoMaterialEntryXT>(endian)?);
+        }
+
+        Ok((textures, materials))
+    }
+}
+
+/// A single `material_list` entry for EngineXT (version 244+) GEOM chunks.
+/// See [`EXGeoHeaderXT::read_texture_and_material_lists`] for how this was
+/// found and what isn't confirmed yet.
+#[binrw]
+#[derive(Debug, Clone, Copy)]
+pub struct EXGeoMaterialEntryXT {
+    pub material_uid: u32,
+    pub texture_uid: u32,
+    pub _reserved: u32,
+    pub index: u32,
+    pub packed: u32,
 }
 
 #[cfg(test)]
@@ -207,16 +265,57 @@ mod xt_tests {
         assert_eq!(header.skeleton_list.count, 0);
         assert_eq!(header.timeline_list.count, 1);
 
-        // NOTE: texture_list's per-entry inner format has an extra
-        // indirection level not yet fully mapped -- each 8-byte entry at
-        // texture_list.offset_absolute is *not* a direct 4-byte hashcode,
-        // it's some kind of pointer/index (multiple entries can resolve to
-        // the same target, ruling out a simple self-relative-offset
-        // theory). The real per-texture hashcode data lives further into
-        // the chunk (confirmed manually in tools/test_geom_decrypt.py /
-        // memory notes) but the exact entry layout connecting the two is a
-        // follow-up task, not blocking this decryption validation.
-        let _ = decrypted; // decrypted buffer available for that follow-up work
+        // texture_list/material_list's declared offset_absolute fields are
+        // misleading (see read_texture_and_material_lists docs) -- the real
+        // data is packed sequentially starting right after the fixed
+        // header, found by working through the bytes directly rather than
+        // trusting the descriptor offsets.
+        let (textures, materials) = header
+            .read_texture_and_material_lists(&decrypted, binrw::Endian::Big)
+            .expect("list read failed");
+
+        assert_eq!(
+            textures,
+            vec![
+                0x4020483e, 0x4020483f, 0x40204840, 0x40204841, 0x40204842, 0x40204843,
+                0x40204898
+            ]
+        );
+
+        assert_eq!(materials.len(), 7);
+        for (i, m) in materials.iter().enumerate() {
+            assert_eq!(m.index, i as u32, "material[{i}].index");
+            assert_eq!(m._reserved, 0, "material[{i}]._reserved");
+        }
+        // First three materials reference the first three textures in order.
+        assert_eq!(materials[0].material_uid, 0x40280000);
+        assert_eq!(materials[0].texture_uid, textures[0]);
+        assert_eq!(materials[1].material_uid, 0x40280001);
+        assert_eq!(materials[1].texture_uid, textures[1]);
+    }
+
+    #[test]
+    fn candycane_textures_and_materials() {
+        let data = load(r"G:\Projects\DisneyUniverseDLCPorting\tools\chunk_tests\nightmare_named\io_nbc_glo_candycane.edb");
+        let (header, decrypted) = EXGeoHeaderXT::read_decrypted(&data).expect("parse failed");
+        assert_eq!(header.hashcode, 0x40100ee4);
+        assert_eq!(header.texture_list.count, 5);
+        assert_eq!(header.material_list.count, 2);
+
+        let (textures, materials) = header
+            .read_texture_and_material_lists(&decrypted, binrw::Endian::Big)
+            .expect("list read failed");
+        assert_eq!(
+            textures,
+            vec![0x402046ff, 0x40204d96, 0x40205705, 0x40205706, 0x40205707]
+        );
+        assert_eq!(materials.len(), 2);
+        assert_eq!(materials[0].material_uid, 0x40280000);
+        assert_eq!(materials[0].texture_uid, textures[0]);
+        assert_eq!(materials[0].index, 0);
+        assert_eq!(materials[1].material_uid, 0x40280001);
+        assert_eq!(materials[1].texture_uid, textures[1]);
+        assert_eq!(materials[1].index, 1);
     }
 
     #[test]
