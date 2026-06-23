@@ -199,9 +199,9 @@ impl EXGeoHeaderXT {
     /// `packed: u32` (low byte always 1 in samples seen, meaning
     /// unconfirmed -- possibly a flags/size field).
     ///
-    /// `entity_list` is not handled here yet -- it has a further wrinkle
-    /// (a sub-table of reference hashcodes precedes entries that echo one
-    /// of those hashcodes back plus extra fields, not yet fully mapped).
+    /// See [`EXGeoHeaderXT::read_entity_list`] for `entity_list`, which
+    /// shares this 20-byte record shape but needs a different (scan-based)
+    /// way to find where its data actually starts.
     pub fn read_texture_and_material_lists(&self, decrypted: &[u8], endian: binrw::Endian) -> binrw::BinResult<(Vec<u32>, Vec<EXGeoMaterialEntryXT>)> {
         use binrw::BinReaderExt;
         let mut cursor = std::io::Cursor::new(decrypted);
@@ -222,6 +222,93 @@ impl EXGeoHeaderXT {
 
         Ok((textures, materials))
     }
+
+    /// Reads `entity_list` contents.
+    ///
+    /// `entity_list` entries are the same 20-byte shape as
+    /// [`EXGeoMaterialEntryXT`] -- `entity_uid`, `group_ref_uid` (a
+    /// hashcode this entity references, category seen so far always one
+    /// step "below" the entity's own category), `_reserved: u32` (always
+    /// 0 in samples seen), `index: u32`, `packed: u32` -- but unlike
+    /// `texture_list`/`material_list`, its real start position is *not*
+    /// simply "right after material_list".
+    ///
+    /// `index` turns out to be a single counter shared across every
+    /// 20-byte-record list in the file (texture_list has none, but
+    /// material_list and entity_list both draw from it), incrementing by
+    /// exactly 1 per record in file order. In every real file checked,
+    /// `entity_list`'s first `index` is *not* always `material_list`'s
+    /// last `index + 1` -- there can be a gap, almost certainly some
+    /// amount of `group_section_list` data (also drawing from the same
+    /// counter, and/or a fixed-size reference sub-table) sitting between
+    /// them that hasn't been mapped yet.
+    ///
+    /// Rather than guess that gap's size, this scans forward from right
+    /// after `material_list` for the first position where `entity_list`'s
+    /// declared `count` worth of 20-byte records all have `_reserved == 0`
+    /// and strictly-ascending `index` values. That signature is specific
+    /// enough that it has produced exactly one match in every real file
+    /// checked. Returns `None` if no such position is found within the
+    /// buffer (e.g. `entity_list.count == 0`, or the signature genuinely
+    /// isn't present).
+    pub fn read_entity_list(&self, decrypted: &[u8], endian: binrw::Endian, materials: &[EXGeoMaterialEntryXT]) -> Option<Vec<EXGeoEntityListEntryXT>> {
+        let count = self.entity_list.count as usize;
+        if count == 0 {
+            return Some(Vec::new());
+        }
+
+        let read_u32 = |off: usize| -> Option<u32> {
+            let bytes: [u8; 4] = decrypted.get(off..off + 4)?.try_into().ok()?;
+            Some(match endian {
+                binrw::Endian::Big => u32::from_be_bytes(bytes),
+                binrw::Endian::Little => u32::from_le_bytes(bytes),
+            })
+        };
+
+        // material_list's last index + 1 is a lower bound, not an exact
+        // prediction -- there can be a gap of unmapped data (see doc
+        // comment) before entity_list's data actually starts, so its first
+        // index can be higher than this. The scan below only requires
+        // internal consistency (ascending by exactly 1, resv == 0)
+        // plus that first index being at or past this bound.
+        let min_first_index = materials.last().map(|m| m.index.wrapping_add(1)).unwrap_or(0);
+        let search_start = 0xB0 + self.texture_list.count as usize * 4 + self.material_list.count as usize * 20;
+        let search_end = decrypted.len().checked_sub(count * 20)?;
+
+        let mut pos = search_start;
+        while pos <= search_end {
+            let first_index = read_u32(pos + 12);
+            let matches = first_index.is_some_and(|fi| fi >= min_first_index)
+                && (0..count).all(|i| {
+                    let off = pos + i * 20;
+                    read_u32(off + 8) == Some(0) && read_u32(off + 12) == Some(first_index.unwrap().wrapping_add(i as u32))
+                });
+            if matches {
+                use binrw::BinReaderExt;
+                let mut cursor = std::io::Cursor::new(decrypted);
+                cursor.seek(SeekFrom::Start(pos as u64)).ok()?;
+                let mut out = Vec::with_capacity(count);
+                for _ in 0..count {
+                    out.push(cursor.read_type::<EXGeoEntityListEntryXT>(endian).ok()?);
+                }
+                return Some(out);
+            }
+            pos += 4;
+        }
+        None
+    }
+}
+
+/// A single `entity_list` entry. See
+/// [`EXGeoHeaderXT::read_entity_list`] for how this was found.
+#[binrw]
+#[derive(Debug, Clone, Copy)]
+pub struct EXGeoEntityListEntryXT {
+    pub entity_uid: u32,
+    pub group_ref_uid: u32,
+    pub _reserved: u32,
+    pub index: u32,
+    pub packed: u32,
 }
 
 /// A single `material_list` entry for EngineXT (version 244+) GEOM chunks.
@@ -292,6 +379,43 @@ mod xt_tests {
         assert_eq!(materials[0].texture_uid, textures[0]);
         assert_eq!(materials[1].material_uid, 0x40280001);
         assert_eq!(materials[1].texture_uid, textures[1]);
+
+        let entities = header
+            .read_entity_list(&decrypted, binrw::Endian::Big, &materials)
+            .expect("entity_list signature not found");
+        assert_eq!(entities.len(), 4);
+        for (i, e) in entities.iter().enumerate() {
+            assert_eq!(e._reserved, 0, "entity[{i}]._reserved");
+            assert_eq!(e.index, materials.last().unwrap().index + 1 + i as u32, "entity[{i}].index");
+        }
+    }
+
+    #[test]
+    fn scythestatue_entity_list_signature_found() {
+        // A rigged/articulated prop (unlike the static gravestone/candycane)
+        // -- has extra data between material_list and entity_list that
+        // isn't mapped yet (likely group_section_list's real payload), so
+        // entity_list's first index doesn't immediately follow
+        // material_list's last index here. read_entity_list's scan handles
+        // this; this test exists specifically to keep covering that case.
+        let data = load(r"G:\Projects\DisneyUniverseDLCPorting\tools\chunk_tests\nightmare_named\io_nbc_l01_a01_scythestatue.edb");
+        let (header, decrypted) = EXGeoHeaderXT::read_decrypted(&data).expect("parse failed");
+        assert_eq!(header.material_list.count, 4);
+        assert_eq!(header.entity_list.count, 6);
+
+        let (_, materials) = header
+            .read_texture_and_material_lists(&decrypted, binrw::Endian::Big)
+            .expect("list read failed");
+        let entities = header
+            .read_entity_list(&decrypted, binrw::Endian::Big, &materials)
+            .expect("entity_list signature not found");
+        assert_eq!(entities.len(), 6);
+        for (i, e) in entities.iter().enumerate() {
+            assert_eq!(e._reserved, 0, "entity[{i}]._reserved");
+            if i > 0 {
+                assert_eq!(e.index, entities[i - 1].index + 1, "entity[{i}].index");
+            }
+        }
     }
 
     #[test]
@@ -316,6 +440,15 @@ mod xt_tests {
         assert_eq!(materials[1].material_uid, 0x40280001);
         assert_eq!(materials[1].texture_uid, textures[1]);
         assert_eq!(materials[1].index, 1);
+
+        let entities = header
+            .read_entity_list(&decrypted, binrw::Endian::Big, &materials)
+            .expect("entity_list signature not found");
+        assert_eq!(entities.len(), 2);
+        assert_eq!(entities[0].index, 2);
+        assert_eq!(entities[1].index, 3);
+        assert_eq!(entities[0]._reserved, 0);
+        assert_eq!(entities[1]._reserved, 0);
     }
 
     #[test]
