@@ -151,14 +151,24 @@ impl EXGeoHeaderXT {
     /// decrypted header's list descriptors don't look at all sane (wildly
     /// implausible counts), try [`Self::read_plain`] instead.
     pub fn read_decrypted(data: &[u8]) -> binrw::BinResult<(Self, Vec<u8>)> {
-        // file_size lives in the unencrypted part of the header (offset 0x10),
-        // peek it before decrypting to know exactly where the cipher region ends.
-        let file_size = if data.len() >= 0x14 {
-            Some(u32::from_le_bytes(data[0x10..0x14].try_into().unwrap()) as usize)
+        // base_file_size lives in the unencrypted part of the header
+        // (file offset 0x18, right after file_size at 0x14) -- peek it
+        // before decrypting to know exactly where the cipher region ends.
+        // This is *not* the same as file_size/filelen: for chunks that have
+        // a lot of genuinely-plaintext data appended after the list region
+        // (e.g. CustomAttributeTemplate row data), base_file_size covers
+        // only the encrypted header+list portion, while file_size covers
+        // the whole resource including that trailing plaintext data --
+        // decrypting all the way to file_size corrupts it. For chunks
+        // without such trailing data the two are equal, so this didn't
+        // matter until a real example (a PC LevelCAT-bearing chunk,
+        // base_file_size=1488 vs file_size=82228) turned up.
+        let base_file_size = if data.len() >= 0x1c {
+            Some(u32::from_le_bytes(data[0x18..0x1c].try_into().unwrap()) as usize)
         } else {
             None
         };
-        let decrypted = crate::geoxt_crypto::decrypt_geoxt_region_copy(data, file_size);
+        let decrypted = crate::geoxt_crypto::decrypt_geoxt_region_copy(data, base_file_size);
         let header = Self::read_plain(&decrypted)?;
         Ok((header, decrypted))
     }
@@ -464,5 +474,34 @@ mod xt_tests {
         assert_eq!(header.texture_list.count, 0);
         assert_eq!(header.material_list.count, 0);
         assert_eq!(header.entity_list.count, 0);
+    }
+
+    /// A real PC chunk (little-endian, magic stored as "MOEG") whose
+    /// base_file_size (1488) is drastically smaller than its file_size
+    /// (82228) -- the bulk of the file is genuinely-plaintext
+    /// CustomAttributeTemplate row/schema data appended after the encrypted
+    /// header+list region. This is the regression test for the
+    /// base_file_size-vs-file_size decrypt-boundary bug: decrypting all the
+    /// way to file_size corrupts that trailing data (confirmed manually --
+    /// readable column-name strings like "Scheme"/"HUBIconR" turn to
+    /// garbage), while base_file_size leaves it untouched.
+    #[test]
+    fn pc_levelcat_file_uses_base_file_size_not_file_size() {
+        let data = load(r"G:\Projects\DisneyUniverseDLCPorting\tools\chunk_tests\pc_levelcat_0x40100d13.edb");
+        assert_eq!(data[0..4], *b"MOEG");
+
+        let (header, decrypted) = EXGeoHeaderXT::read_decrypted(&data).expect("parse failed");
+        assert_eq!(header.hashcode, 0x40100d13);
+        assert_eq!(header.file_size, 82228);
+        assert_eq!(header.base_file_size, 1488);
+        assert_eq!(header.group_section_list.count, 1);
+        assert_eq!(header.custom_attribute_template_list.count, 25);
+
+        // The genuinely-plaintext column-schema region starting at this
+        // relative offset must survive untouched -- it would decrypt to
+        // garbage if the cipher were (wrongly) applied all the way to
+        // file_size instead of stopping at base_file_size.
+        let schema_region = &decrypted[0x3080..0x3080 + 16];
+        assert!(schema_region.windows(6).any(|w| w == b"Scheme"));
     }
 }

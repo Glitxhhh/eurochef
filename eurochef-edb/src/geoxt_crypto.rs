@@ -16,14 +16,18 @@
 //! sane `(count, offset)` pairs, and list *data* itself (e.g. `texture_list`
 //! entries) decrypts to real, sequential-looking hashcodes.
 //!
-//! Not every GEOM chunk is encrypted this way -- at least one real PC file
-//! (a `CustomAttributeTemplate`-bearing data/config chunk) was found to
-//! already be plaintext, with applying this cipher actively corrupting
-//! known-good data. The condition controlling whether a given chunk uses
-//! this cipher hasn't been identified yet -- callers should be prepared for
-//! either case (e.g. try decrypted first, and if the resulting list
-//! descriptors don't look sane -- implausible counts/offsets -- fall back
-//! to the data as-is).
+//! Every v244 GEOM chunk checked so far (Xbox 360 DLC files and a PC
+//! `CustomAttributeTemplate`-bearing data/config chunk) does turn out to be
+//! encrypted this way -- an earlier note here claiming the PC file was an
+//! exception was wrong, caused by decrypting past the real end of the
+//! encrypted region (see [`crate::header::EXGeoHeaderXT::read_decrypted`]'s
+//! `base_file_size`-vs-`file_size` doc comment for the actual subtlety:
+//! some chunks have a large amount of genuinely-plaintext data, like
+//! `CustomAttributeTemplate` row data, appended after the encrypted
+//! header+list region, and decrypting into that trailing data corrupts it).
+//! Still worth a sanity check on any new chunk type -- if the decrypted
+//! list descriptors don't look sane (implausible counts/offsets), try
+//! [`crate::header::EXGeoHeaderXT::read_plain`] on the raw bytes instead.
 
 /// The literal RC4 key embedded in `DisneyUPC.exe`'s GeoFile loader. 65
 /// bytes: 64 visible ASCII characters plus a NUL terminator that's part of
@@ -67,9 +71,12 @@ impl Rc4State {
 
 /// Decrypts `data[GEOXT_CIPHER_START_OFFSET..end]` in place, where `end` is
 /// `data.len()` if `end` is `None`, or the given value clamped to
-/// `data.len()`. Pass the chunk's own `file_size` header field as `end` to
-/// match exactly what the game does (decrypt only through the logical end
-/// of the file, not any trailing padding).
+/// `data.len()`. Pass the chunk's own `base_file_size` header field (not
+/// `file_size`/`filelen` -- they can differ when a chunk has plaintext data
+/// appended after its list region, e.g. `CustomAttributeTemplate` row data)
+/// as `end` to match exactly what the game does (decrypt only through the
+/// logical end of the encrypted header+list region, not any trailing
+/// plaintext data or padding).
 ///
 /// No-op if `data` is shorter than `GEOXT_CIPHER_START_OFFSET`.
 pub fn decrypt_geoxt_region(data: &mut [u8], end: Option<usize>) {
