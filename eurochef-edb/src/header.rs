@@ -338,16 +338,27 @@ pub struct EXGeoMaterialEntryXT {
 mod xt_tests {
     use super::*;
 
-    fn load(path: &str) -> Vec<u8> {
-        std::fs::read(path).expect("test fixture missing -- only runs against this project's own checkout")
+    /// Test fixtures are real Disney Universe files that cannot be redistributed, so they are not in the repo.
+    /// Point `EUROCHEF_TEST_FIXTURES` at a directory containing them (e.g. `nightmare_named/io_nbc_glo_gravestone.edb`)
+    /// to run these tests; without it each test is skipped.
+    fn fixture(relative: &str) -> Option<Vec<u8>> {
+        let dir = std::env::var_os("EUROCHEF_TEST_FIXTURES")?;
+        let path = std::path::Path::new(&dir).join(relative);
+        match std::fs::read(&path) {
+            Ok(data) => Some(data),
+            Err(_) => {
+                eprintln!("skipping: fixture {} not found", path.display());
+                None
+            }
+        }
     }
 
     /// A static prop model with known texture/material/entity counts,
-    /// independently verified in Python (tools/test_geom_decrypt.py) against
+    /// independently verified with a separate Python implementation against
     /// the same real Xbox 360 Nightmare Before Christmas DLC file.
     #[test]
     fn gravestone_decrypts_to_known_counts() {
-        let data = load(r"G:\Projects\DisneyUniverseDLCPorting\tools\chunk_tests\nightmare_named\io_nbc_glo_gravestone.edb");
+        let Some(data) = fixture("nightmare_named/io_nbc_glo_gravestone.edb") else { return; };
         let (header, decrypted) = EXGeoHeaderXT::read_decrypted(&data).expect("parse failed");
 
         assert_eq!(header.hashcode, 0x40100eda);
@@ -408,7 +419,7 @@ mod xt_tests {
         // entity_list's first index doesn't immediately follow
         // material_list's last index here. read_entity_list's scan handles
         // this; this test exists specifically to keep covering that case.
-        let data = load(r"G:\Projects\DisneyUniverseDLCPorting\tools\chunk_tests\nightmare_named\io_nbc_l01_a01_scythestatue.edb");
+        let Some(data) = fixture("nightmare_named/io_nbc_l01_a01_scythestatue.edb") else { return; };
         let (header, decrypted) = EXGeoHeaderXT::read_decrypted(&data).expect("parse failed");
         assert_eq!(header.material_list.count, 4);
         assert_eq!(header.entity_list.count, 6);
@@ -430,7 +441,7 @@ mod xt_tests {
 
     #[test]
     fn candycane_textures_and_materials() {
-        let data = load(r"G:\Projects\DisneyUniverseDLCPorting\tools\chunk_tests\nightmare_named\io_nbc_glo_candycane.edb");
+        let Some(data) = fixture("nightmare_named/io_nbc_glo_candycane.edb") else { return; };
         let (header, decrypted) = EXGeoHeaderXT::read_decrypted(&data).expect("parse failed");
         assert_eq!(header.hashcode, 0x40100ee4);
         assert_eq!(header.texture_list.count, 5);
@@ -466,7 +477,7 @@ mod xt_tests {
         // A pure data/manifest file with no visual assets -- everything
         // except group_section_list and custom_attribute_template_list
         // should be empty.
-        let data = load(r"G:\Projects\DisneyUniverseDLCPorting\tools\chunk_tests\nightmare_named\nbc_content_basepack.edb");
+        let Some(data) = fixture("nightmare_named/nbc_content_basepack.edb") else { return; };
         let (header, _) = EXGeoHeaderXT::read_decrypted(&data).expect("parse failed");
 
         assert_eq!(header.group_section_list.count, 1);
@@ -487,7 +498,7 @@ mod xt_tests {
     /// garbage), while base_file_size leaves it untouched.
     #[test]
     fn pc_levelcat_file_uses_base_file_size_not_file_size() {
-        let data = load(r"G:\Projects\DisneyUniverseDLCPorting\tools\chunk_tests\pc_levelcat_0x40100d13.edb");
+        let Some(data) = fixture("pc_levelcat_0x40100d13.edb") else { return; };
         assert_eq!(data[0..4], *b"MOEG");
 
         let (header, decrypted) = EXGeoHeaderXT::read_decrypted(&data).expect("parse failed");
