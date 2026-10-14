@@ -30,6 +30,7 @@ _(Priority currently lies with Spyro and G-Force)_
 | Buffy The Vampire Slayer: Chaos Bleeds (170)   | ✅/❌                     | ❌    | ❌       | ✅/❌      | ❌          | ❌         | ❔/❌          |
 | Sphinx and the Cursed Mummy (182)              | ✅/❌                     | ❌    | ❌       | ✅/❌      | ❌          | ❌         | ✅/❌          |
 | Spyro: A Hero's Tail (240)                     | ✅/❌                     | ✅/❌  | ❌       | ✅/❌      | ❌          | ❌         | ✅/❌          |
+| Disney Universe (244)<sup>[5]</sup>            | ❌                       | ❌    | ❌       | ❌        | ❌          | ❌         | ❌            |
 | Robots (248)                                   | ✅/❌                     | ✅/❌  | ❌       | ✅/❌      | ❌          | ❌         | ✅/❌          |
 | Predator: Concrete Jungle (250)                | ✅/❌                     | ❔/❌  | ❌       | ✅/❌      | ❌          | ❌         | ✅/❌          |
 | Batman Begins (251)                            | ✅/❌                     | ✅/❌  | ❌       | ✅/❌      | ❌          | ❌         | ✅/❌          |
@@ -41,6 +42,8 @@ _(Priority currently lies with Spyro and G-Force)_
 | GoldenEye 007 (263)                            | ✅/❌                     | ✅/❌  | ❌       | ✅/❌      | ❌          | ❌         | ✅/❌          |
 
 <sup>[1]</sup> Texture/entity support only indicates the ability to read headers and frame data. See the platform matrix for texture/mesh encoding/decoding support
+
+<sup>[5]</sup> Only the file list (v13) and the GEOM header/resource lists are read so far (see Filelists below); no resource data is decoded yet
 
 _❔ indicates an untested feature_
 
